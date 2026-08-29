@@ -1,0 +1,17 @@
+{
+  "name": "securevault",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Local-first, client-side encrypted password vault",
+  "workspaces": ["task-manager-api", "task-manager-frontend"],
+  "scripts": {
+    "dev": "concurrently --kill-others --names API,WEB --prefix-colors cyan,magenta \"bun run --cwd task-manager-api dev\" \"bun run --cwd task-manager-frontend dev\"",
+    "build": "bun run --cwd task-manager-frontend build",
+    "start": "bun run build && bun task-manager-api/app.js",
+    "test": "bun run --cwd task-manager-api test && bun test/frontend-crypto.integration.mjs",
+    "lint": "bun run --cwd task-manager-frontend lint",
+    "check": "bun run lint && bun run build && bun run test"
+  },
+  "devDependencies": { "concurrently": "^9.2.1" },
+  "engines": { "node": ">=20" }
+}

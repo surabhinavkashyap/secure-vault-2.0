@@ -1,0 +1,21 @@
+.local/
+.data/
+**/node_modules/
+**/dist/
+**/config/*.env
+.DS_Store
+.runtime/
+*.log
+*.pid
+.tools/
+/package-lock.json
+**/.env
+**/.env.*
+!**/.env.example
+
+# Abandoned course-era backend copies; the supported API is task-manager-api/.
+/app.js
+/db/
+/middleware/
+/models/
+/src/

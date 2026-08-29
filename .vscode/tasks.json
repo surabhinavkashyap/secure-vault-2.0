@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SecureVault: Open application",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\launch.ps1"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "silent", "panel": "dedicated", "close": true }
+    },
+    {
+      "label": "SecureVault: Development (API + web)",
+      "type": "shell",
+      "command": "${env:USERPROFILE}\\.bun\\bin\\bun.exe",
+      "args": ["run", "dev"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "SecureVault: Verify everything",
+      "type": "shell",
+      "command": "${env:USERPROFILE}\\.bun\\bin\\bun.exe",
+      "args": ["run", "check"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}
