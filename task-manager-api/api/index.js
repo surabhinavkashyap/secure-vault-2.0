@@ -1,19 +1,11 @@
 const { createApp } = require('../app')
 
-let handler
+let appPromise = null
 
 module.exports = async (req, res) => {
-  try {
-    if (!handler) {
-      const { app } = await createApp()
-      handler = app
-    }
-    return handler(req, res)
-  } catch (err) {
-    console.error('Vercel serverless startup error:', err)
-    res.status(500).json({
-      error: 'Serverless initialization failed',
-      details: err.message
-    })
+  if (!appPromise) {
+    appPromise = createApp().then(({ app }) => app)
   }
+  const app = await appPromise
+  return app(req, res)
 }
