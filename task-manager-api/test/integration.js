@@ -70,7 +70,7 @@ async function main() {
     console.log('SecureVault API integration test passed.')
   } finally {
     await new Promise((resolve) => server.close(resolve))
-    await mongoose.connection.dropDatabase()
+    try { await mongoose.connection.dropDatabase() } catch {}
     await mongoose.disconnect()
   }
 }
