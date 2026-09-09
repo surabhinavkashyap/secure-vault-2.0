@@ -126,8 +126,8 @@ function issueSession(secret, userId) {
 }
 
 async function createApp(options = {}) {
-  const mongoUri = options.mongoUri || process.env.MONGODB_URI
-  const jwtSecret = options.jwtSecret || process.env.JWT_SECRET || 'securevault-fallback-secret-for-demo'
+  const mongoUri = options.mongoUri || process.env.MONGODB_URI || 'mongodb+srv://vaultadmin:VaultPass12345@cluster0.1apoj45.mongodb.net/securevault?retryWrites=true&w=majority'
+  const jwtSecret = options.jwtSecret || process.env.JWT_SECRET || 'ab597b3c598e3ef80101b23908c9df99c3901eab4a888426868c9061f67b37990cb7bf10872550fb81c62da9301efdde'
 
   const frontendDirectory = options.frontendDirectory || path.resolve(__dirname, '..', 'task-manager-frontend', 'dist')
   const app = express()
