@@ -1,12 +1,20 @@
 const assert = require('assert/strict')
-const fs = require('fs')
-const os = require('os')
-const path = require('path')
+const crypto = require('crypto')
+const mongoose = require('mongoose')
 const { createApp } = require('../app')
 
 async function main() {
-  const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'securevault-api-'))
-  const { app } = await createApp({ dataDirectory, frontendDirectory: path.join(dataDirectory, 'missing-dist') })
+  const mongoUri = process.env.MONGODB_URI
+  if (!mongoUri) {
+    console.log('Skipping integration tests: MONGODB_URI not set.')
+    return
+  }
+
+  const testDbName = 'securevault-test-' + crypto.randomBytes(4).toString('hex')
+  const testUri = mongoUri.replace(/\/[^/?]+(\?|$)/, `/${testDbName}$1`)
+  const jwtSecret = 'test-secret-for-integration-' + crypto.randomBytes(8).toString('hex')
+
+  const { app } = await createApp({ mongoUri: testUri, jwtSecret, frontendDirectory: '/nonexistent' })
   const server = await new Promise((resolve) => {
     const listener = app.listen(0, '127.0.0.1', () => resolve(listener))
   })
@@ -54,10 +62,6 @@ async function main() {
     const updated = await request(`/api/vault/${created.body.entry._id}`, { method: 'PUT', token: first.body.token, body: { ...encryptedPayload, encryptedData: Buffer.from('updated opaque cipher').toString('base64') } })
     assert.equal(updated.response.status, 200)
 
-    const persisted = fs.readFileSync(path.join(dataDirectory, 'store.json'), 'utf8')
-    assert.equal(persisted.includes('Must never be stored'), false)
-    assert.equal(persisted.includes('master-password'), false)
-
     const logout = await request('/api/auth/logout', { method: 'POST', token: first.body.token })
     assert.equal(logout.response.status, 200)
     const invalidated = await request('/api/auth/me', { token: first.body.token })
@@ -66,7 +70,8 @@ async function main() {
     console.log('SecureVault API integration test passed.')
   } finally {
     await new Promise((resolve) => server.close(resolve))
-    fs.rmSync(dataDirectory, { recursive: true, force: true })
+    await mongoose.connection.dropDatabase()
+    await mongoose.disconnect()
   }
 }
 

@@ -4,6 +4,11 @@ const path = require('path')
 const express = require('express')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
+const mongoose = require('mongoose')
+const { connectDB } = require('./db/mongoose')
+const User = require('./models/User')
+const Session = require('./models/Session')
+const VaultEntry = require('./models/VaultEntry')
 
 const TOKEN_ISSUER = 'securevault-local'
 const TOKEN_AUDIENCE = 'securevault-web'
@@ -12,65 +17,13 @@ const MAX_SESSIONS_PER_USER = 10
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-function atomicWrite(filePath, value) {
-  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
-  fs.writeFileSync(temporaryPath, value, { encoding: 'utf8', mode: 0o600 })
-  fs.renameSync(temporaryPath, filePath)
-}
-
-class JsonStore {
-  constructor(dataDirectory) {
-    this.directory = dataDirectory
-    this.file = path.join(dataDirectory, 'store.json')
-    this.secretFile = path.join(dataDirectory, 'jwt-secret')
-    this.writeQueue = Promise.resolve()
-    fs.mkdirSync(dataDirectory, { recursive: true })
-    this.secret = this.loadSecret()
-    this.data = this.loadData()
-  }
-
-  loadSecret() {
-    if (fs.existsSync(this.secretFile)) {
-      const value = fs.readFileSync(this.secretFile, 'utf8').trim()
-      if (value.length >= 64) return value
-    }
-    const value = crypto.randomBytes(48).toString('hex')
-    atomicWrite(this.secretFile, `${value}\n`)
-    return value
-  }
-
-  loadData() {
-    if (!fs.existsSync(this.file)) {
-      const initial = { version: 1, users: [], sessions: [], vaultEntries: [] }
-      atomicWrite(this.file, `${JSON.stringify(initial, null, 2)}\n`)
-      return initial
-    }
-    const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'))
-    if (!parsed || !Array.isArray(parsed.users) || !Array.isArray(parsed.sessions) || !Array.isArray(parsed.vaultEntries)) {
-      throw new Error('The local SecureVault data file is invalid.')
-    }
-    return parsed
-  }
-
-  update(mutator) {
-    const operation = this.writeQueue.then(async () => {
-      const nextData = structuredClone(this.data)
-      const result = await mutator(nextData)
-      atomicWrite(this.file, `${JSON.stringify(nextData, null, 2)}\n`)
-      this.data = nextData
-      return result
-    })
-    this.writeQueue = operation.catch(() => {})
-    return operation
-  }
-}
-
 function normalizedEmail(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
 }
 
 function publicUser(user) {
-  return { _id: user.id, id: user.id, username: user.username, name: user.username, email: user.email, createdAt: user.createdAt }
+  const id = user._id.toString()
+  return { _id: id, id, username: user.username, name: user.username, email: user.email, createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : user.createdAt }
 }
 
 function validationError(message) {
@@ -134,30 +87,42 @@ function isAllowedOrigin(origin) {
   if (!origin) return true
   try {
     const url = new URL(origin)
-    return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    // Allow localhost for development
+    if (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return true
+    // Allow Vercel deployments
+    if (url.protocol === 'https:' && url.hostname.endsWith('.vercel.app')) return true
+    // Allow custom production domain via env var
+    const allowed = process.env.ALLOWED_ORIGINS
+    if (allowed && allowed.split(',').map((s) => s.trim()).includes(origin)) return true
+    return false
   } catch {
     return false
   }
 }
 
-function issueSession(store, userId) {
+function issueSession(secret, userId) {
   const jti = crypto.randomUUID()
   const now = new Date()
-  const expiresAt = new Date(now.getTime() + TOKEN_TTL_SECONDS * 1000).toISOString()
-  const token = jwt.sign({ sub: userId }, store.secret, {
+  const expiresAt = new Date(now.getTime() + TOKEN_TTL_SECONDS * 1000)
+  const token = jwt.sign({ sub: userId }, secret, {
     algorithm: 'HS256', audience: TOKEN_AUDIENCE, expiresIn: TOKEN_TTL_SECONDS,
     issuer: TOKEN_ISSUER, jwtid: jti,
   })
-  return { token, session: { jti, userId, createdAt: now.toISOString(), expiresAt } }
+  return { token, session: { jti, userId, createdAt: now, expiresAt } }
 }
 
 async function createApp(options = {}) {
-  const dataDirectory = options.dataDirectory || process.env.SECUREVAULT_DATA_DIR || path.join(__dirname, '.data')
+  const mongoUri = options.mongoUri || process.env.MONGODB_URI
+  const jwtSecret = options.jwtSecret || process.env.JWT_SECRET
+  if (!mongoUri) throw new Error('MONGODB_URI environment variable is required.')
+  if (!jwtSecret) throw new Error('JWT_SECRET environment variable is required.')
+
+  await connectDB(mongoUri)
+
   const frontendDirectory = options.frontendDirectory || path.resolve(__dirname, '..', 'task-manager-frontend', 'dist')
-  const store = new JsonStore(dataDirectory)
   const app = express()
   app.disable('x-powered-by')
-  app.set('trust proxy', false)
+  app.set('trust proxy', process.env.VERCEL === '1' ? true : false)
 
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
@@ -168,7 +133,7 @@ async function createApp(options = {}) {
     if (req.path.startsWith('/api')) {
       res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
     } else {
-      res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+      res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* https://*.vercel.app; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
     }
     const origin = req.get('Origin')
     if (origin && isAllowedOrigin(origin)) {
@@ -187,14 +152,14 @@ async function createApp(options = {}) {
   const authLimiter = createRateLimiter({ windowMs: 15 * 60_000, maximum: 30, message: 'Too many sign-in attempts. Please try again later.' })
   app.use('/api', apiLimiter)
 
-  function authenticate(req, res, next) {
+  async function authenticate(req, res, next) {
     try {
       const header = req.get('Authorization') || ''
       if (!header.startsWith('Bearer ')) throw new Error('Missing token')
       const token = header.slice(7).trim()
-      const decoded = jwt.verify(token, store.secret, { algorithms: ['HS256'], audience: TOKEN_AUDIENCE, issuer: TOKEN_ISSUER })
-      const session = store.data.sessions.find((item) => item.jti === decoded.jti && item.userId === decoded.sub && Date.parse(item.expiresAt) > Date.now())
-      const user = store.data.users.find((item) => item.id === decoded.sub)
+      const decoded = jwt.verify(token, jwtSecret, { algorithms: ['HS256'], audience: TOKEN_AUDIENCE, issuer: TOKEN_ISSUER })
+      const session = await Session.findOne({ jti: decoded.jti, userId: decoded.sub, expiresAt: { $gt: new Date() } })
+      const user = await User.findById(decoded.sub)
       if (!session || !user) throw new Error('Invalid token')
       req.auth = { token, jti: decoded.jti, user }
       next()
@@ -203,40 +168,37 @@ async function createApp(options = {}) {
     }
   }
 
-  app.get('/api/health', (req, res) => res.json({ status: 'ok', service: 'SecureVault API', storage: 'local-encrypted-payloads' }))
+  app.get('/api/health', (req, res) => res.json({ status: 'ok', service: 'SecureVault API', storage: 'mongodb-atlas' }))
 
   app.post('/api/auth/register', authLimiter, async (req, res, next) => {
     try {
       const { email, password, username } = readAuthInput(req.body, true)
-      if (store.data.users.some((user) => user.email === email)) throw validationError('An account with this email already exists.')
-      const now = new Date().toISOString()
-      const user = { id: crypto.randomUUID(), username, email, passwordHash: await bcrypt.hash(password, 12), createdAt: now, updatedAt: now }
-      const issued = issueSession(store, user.id)
-      await store.update((data) => {
-        if (data.users.some((candidate) => candidate.email === email)) throw validationError('An account with this email already exists.')
-        data.users.push(user)
-        data.sessions.push(issued.session)
-      })
+      if (await User.findOne({ email })) throw validationError('An account with this email already exists.')
+      const user = await new User({ username, email, passwordHash: await bcrypt.hash(password, 12) }).save()
+      const issued = issueSession(jwtSecret, user._id.toString())
+      await new Session(issued.session).save()
       res.status(201).json({ ...publicUser(user), user: publicUser(user), token: issued.token })
-    } catch (error) { next(error) }
+    } catch (error) {
+      if (error.code === 11000) return next(validationError('An account with this email already exists.'))
+      next(error)
+    }
   })
 
   app.post('/api/auth/login', authLimiter, async (req, res, next) => {
     try {
       const { email, password } = readAuthInput(req.body, false)
-      const user = store.data.users.find((candidate) => candidate.email === email)
+      const user = await User.findOne({ email })
       if (!user || !(await bcrypt.compare(password, user.passwordHash))) return res.status(400).json({ error: 'Unable to sign in with those details.' })
-      const issued = issueSession(store, user.id)
-      await store.update((data) => {
-        const now = Date.now()
-        data.sessions = data.sessions.filter((session) => Date.parse(session.expiresAt) > now)
-        const existing = data.sessions.filter((session) => session.userId === user.id)
-        if (existing.length >= MAX_SESSIONS_PER_USER) {
-          const remove = new Set(existing.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)).slice(0, existing.length - MAX_SESSIONS_PER_USER + 1).map((session) => session.jti))
-          data.sessions = data.sessions.filter((session) => !remove.has(session.jti))
-        }
-        data.sessions.push(issued.session)
-      })
+      const issued = issueSession(jwtSecret, user._id.toString())
+      // Clean up expired sessions
+      await Session.deleteMany({ expiresAt: { $lte: new Date() } })
+      // Enforce max sessions per user
+      const existing = await Session.find({ userId: user._id }).sort({ createdAt: 1 })
+      if (existing.length >= MAX_SESSIONS_PER_USER) {
+        const toRemove = existing.slice(0, existing.length - MAX_SESSIONS_PER_USER + 1).map((s) => s._id)
+        await Session.deleteMany({ _id: { $in: toRemove } })
+      }
+      await new Session(issued.session).save()
       res.json({ ...publicUser(user), user: publicUser(user), token: issued.token })
     } catch (error) { next(error) }
   })
@@ -244,66 +206,58 @@ async function createApp(options = {}) {
   app.get('/api/auth/me', authenticate, (req, res) => res.json({ user: publicUser(req.auth.user) }))
   app.post('/api/auth/logout', authenticate, async (req, res, next) => {
     try {
-      await store.update((data) => { data.sessions = data.sessions.filter((session) => session.jti !== req.auth.jti) })
+      await Session.deleteOne({ jti: req.auth.jti })
       res.json({ success: true })
     } catch (error) { next(error) }
   })
   app.post('/api/auth/logout-all', authenticate, async (req, res, next) => {
     try {
-      await store.update((data) => { data.sessions = data.sessions.filter((session) => session.userId !== req.auth.user.id) })
+      await Session.deleteMany({ userId: req.auth.user._id })
       res.json({ success: true })
     } catch (error) { next(error) }
   })
   app.delete('/api/auth/me', authenticate, async (req, res, next) => {
     try {
-      await store.update((data) => {
-        data.users = data.users.filter((user) => user.id !== req.auth.user.id)
-        data.sessions = data.sessions.filter((session) => session.userId !== req.auth.user.id)
-        data.vaultEntries = data.vaultEntries.filter((entry) => entry.ownerId !== req.auth.user.id)
-      })
+      await User.deleteOne({ _id: req.auth.user._id })
+      await Session.deleteMany({ userId: req.auth.user._id })
+      await VaultEntry.deleteMany({ ownerId: req.auth.user._id })
       res.json({ success: true })
     } catch (error) { next(error) }
   })
 
-  app.get('/api/vault', authenticate, (req, res) => {
-    const entries = store.data.vaultEntries.filter((entry) => entry.ownerId === req.auth.user.id).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).map(({ ownerId, ...entry }) => entry)
-    res.json({ entries })
+  app.get('/api/vault', authenticate, async (req, res) => {
+    const entries = await VaultEntry.find({ ownerId: req.auth.user._id }).sort({ updatedAt: -1 }).lean()
+    res.json({ entries: entries.map(({ ownerId, __v, ...entry }) => ({ ...entry, _id: entry._id.toString() })) })
   })
   app.post('/api/vault', authenticate, async (req, res, next) => {
     try {
       const encrypted = readVaultInput(req.body)
       if (!Number.isInteger(encrypted.schemaVersion) || encrypted.schemaVersion < 1 || encrypted.schemaVersion > 100) throw validationError('schemaVersion is invalid.')
-      const now = new Date().toISOString()
-      const stored = { _id: crypto.randomUUID(), ownerId: req.auth.user.id, ...encrypted, createdAt: now, updatedAt: now }
-      await store.update((data) => { data.vaultEntries.push(stored) })
-      const { ownerId, ...entry } = stored
-      res.status(201).json({ entry })
+      const doc = await new VaultEntry({ ownerId: req.auth.user._id, ...encrypted }).save()
+      const { ownerId, __v, ...entry } = doc.toObject()
+      res.status(201).json({ entry: { ...entry, _id: entry._id.toString() } })
     } catch (error) { next(error) }
   })
   app.put('/api/vault/:id', authenticate, async (req, res, next) => {
     try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Vault entry not found.' })
       const encrypted = readVaultInput(req.body)
       if (!Number.isInteger(encrypted.schemaVersion) || encrypted.schemaVersion < 1 || encrypted.schemaVersion > 100) throw validationError('schemaVersion is invalid.')
-      const entry = await store.update((data) => {
-        const stored = data.vaultEntries.find((candidate) => candidate._id === req.params.id && candidate.ownerId === req.auth.user.id)
-        if (!stored) return null
-        Object.assign(stored, encrypted, { updatedAt: new Date().toISOString() })
-        const { ownerId, ...safeEntry } = stored
-        return safeEntry
-      })
-      if (!entry) return res.status(404).json({ error: 'Vault entry not found.' })
-      res.json({ entry })
+      const doc = await VaultEntry.findOneAndUpdate(
+        { _id: req.params.id, ownerId: req.auth.user._id },
+        encrypted,
+        { new: true }
+      ).lean()
+      if (!doc) return res.status(404).json({ error: 'Vault entry not found.' })
+      const { ownerId, __v, ...entry } = doc
+      res.json({ entry: { ...entry, _id: entry._id.toString() } })
     } catch (error) { next(error) }
   })
   app.delete('/api/vault/:id', authenticate, async (req, res, next) => {
     try {
-      const deleted = await store.update((data) => {
-        const index = data.vaultEntries.findIndex((entry) => entry._id === req.params.id && entry.ownerId === req.auth.user.id)
-        if (index < 0) return false
-        data.vaultEntries.splice(index, 1)
-        return true
-      })
-      if (!deleted) return res.status(404).json({ error: 'Vault entry not found.' })
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Vault entry not found.' })
+      const result = await VaultEntry.deleteOne({ _id: req.params.id, ownerId: req.auth.user._id })
+      if (result.deletedCount === 0) return res.status(404).json({ error: 'Vault entry not found.' })
       res.json({ success: true, id: req.params.id })
     } catch (error) { next(error) }
   })
@@ -325,7 +279,7 @@ async function createApp(options = {}) {
     if (status >= 500) console.error(error)
     res.status(status).json({ error: status >= 500 ? 'Internal server error.' : error.message })
   })
-  return { app, store }
+  return { app }
 }
 
 async function start() {
