@@ -1,12 +1,11 @@
 const { createApp } = require('../task-manager-api/app')
 
-let handler
+let appPromise = null
 
 module.exports = async (req, res) => {
-  if (!handler) {
-    const { app } = await createApp()
-    handler = app
+  if (!appPromise) {
+    appPromise = createApp().then(({ app }) => app)
   }
-  return handler(req, res)
+  const app = await appPromise
+  return app(req, res)
 }
-
