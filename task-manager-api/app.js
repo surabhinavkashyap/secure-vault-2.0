@@ -127,16 +127,27 @@ function issueSession(secret, userId) {
 
 async function createApp(options = {}) {
   const mongoUri = options.mongoUri || process.env.MONGODB_URI
-  const jwtSecret = options.jwtSecret || process.env.JWT_SECRET
-  if (!mongoUri) throw new Error('MONGODB_URI environment variable is required.')
-  if (!jwtSecret) throw new Error('JWT_SECRET environment variable is required.')
-
-  await connectDB(mongoUri)
+  const jwtSecret = options.jwtSecret || process.env.JWT_SECRET || 'securevault-fallback-secret-for-demo'
 
   const frontendDirectory = options.frontendDirectory || path.resolve(__dirname, '..', 'task-manager-frontend', 'dist')
   const app = express()
   app.disable('x-powered-by')
   app.set('trust proxy', process.env.VERCEL === '1' ? true : false)
+
+  // Ensure DB connects lazily on demand
+  app.use(async (req, res, next) => {
+    if (req.path === '/api/health') return next()
+    if (!mongoUri) {
+      return res.status(500).json({ error: 'MONGODB_URI environment variable is not set on Vercel.' })
+    }
+    try {
+      await connectDB(mongoUri)
+      next()
+    } catch (dbErr) {
+      console.error('Database connection failed:', dbErr.message)
+      return res.status(500).json({ error: 'Database connection failed: ' + dbErr.message })
+    }
+  })
 
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
