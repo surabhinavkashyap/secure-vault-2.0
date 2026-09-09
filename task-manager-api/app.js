@@ -1,6 +1,20 @@
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
+
+// Load environment variables from .env if present (root or local)
+for (const envPath of [path.resolve(__dirname, '..', '.env'), path.resolve(__dirname, '.env')]) {
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf8')
+    for (const line of content.split(/\r?\n/)) {
+      const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)?\s*$/)
+      if (match && !process.env[match[1]]) {
+        process.env[match[1]] = match[2]?.trim().replace(/^["']|["']$/g, '') || ''
+      }
+    }
+  }
+}
+
 const express = require('express')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
